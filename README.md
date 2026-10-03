@@ -26,7 +26,7 @@ SwiftPM 工程（Swift 5.8+ / macOS 13+），零第三方依赖：
 swift build          # 编译
 swift test           # 单元测试（DirectoryScanner / CropSession / CropExporter / FileTrasher / GalleryViewModel / ImageLoader / TextRecognizer / ZoomPolicy）
 scripts/bundle.sh    # release 构建并组装 tidy.app（含 Info.plist 声明）
-scripts/dmg.sh       # 产出 tidy.dmg（未签名/未公证，他人机器首次打开需右键 → 打开）
+scripts/dmg.sh       # 产出 tidy.dmg（本机自签名证书 tidy-local 固定身份，TCC 授权不随重装失效；未公证，他人机器首次打开需右键 → 打开）
 ```
 
 > 本仓库开发机若只有 Command Line Tools（无 Xcode），`swift build`/`swift test` 需要先执行一次 `scripts/test-env/bootstrap.sh` 并按其提示设置 `DEVELOPER_DIR` 与 `PATH`；有 Xcode 则直接可用。

@@ -31,5 +31,12 @@ if [ -f "Resources/AppIcon.icns" ]; then
     cp "Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 fi
 
+# 固定身份签名：本机自签名证书 tidy-local 存在则用它签（否则保留 ad-hoc）。
+# ad-hoc 按代码哈希认身份，每次构建哈希都变 → TCC（下载文件夹访问等）每次重装重新弹授权；
+# 固定证书身份后授权只授一次（详设 §4 分发）
+if security find-certificate -c tidy-local ~/Library/Keychains/login.keychain-db >/dev/null 2>&1; then
+    codesign --force --sign "tidy-local" "$APP"
+fi
+
 echo "Built $APP"
 find "$APP" -type f | sort

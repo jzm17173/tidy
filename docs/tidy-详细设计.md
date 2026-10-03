@@ -362,7 +362,7 @@ scripts/            bundle.sh（swift build -c release → 组装 tidy.app）、
                     dmg.sh（bundle → 读写 dmg 内用 AppleScript 摆安装窗口：双分辨率
                     background.tiff（72/144dpi，Retina 下箭头不糊）、图标 64 对位
                     {130,188}/{410,188}、窗口 540×380、隐藏工具栏、卷宗名
-                    tidy {版本}-{arch}、卷宗图标，再转 UDZO 只读压缩；未签名/未公证）
+                    tidy {版本}-{arch}、卷宗图标，再转 UDZO 只读压缩；本机自签名、未公证）
 ```
 
 > Info.plist 对 SPM 可执行文件不生效，需经 `scripts/bundle.sh` 组装 .app 后声明才起作用。
@@ -388,7 +388,7 @@ scripts/            bundle.sh（swift build -c release → 组装 tidy.app）、
 3. **M3**：FileTrasher + toast + 空态 —— FR-3
 4. **M4**：CropOverlayView + CropSession + CropExporter + SavePanel —— FR-4
 5. **M5**：Services 声明、图标、窗口尺寸策略、错误态打磨 —— FR-5
-6. **M6**：签名公证（dmg 打包已由 `scripts/dmg.sh` 完成：bundle → hdiutil，含 /Applications 拖装软链；未签名/未公证，仅供信任来源分发，他人机器首次打开需右键 → 打开）
+6. **M6**：签名公证（dmg 打包已由 `scripts/dmg.sh` 完成：bundle → hdiutil，含 /Applications 拖装软链；`bundle.sh` 在登录钥匙串存在自签名证书 `tidy-local` 时自动固定身份签名——ad-hoc 签名按代码哈希认身份、每次构建都变，会导致 TCC（下载文件夹访问等）每次重装重复弹授权，固定证书身份后授权只授一次；仍非 Developer ID/未公证，仅供信任来源分发，他人机器首次打开需右键 → 打开）
 7. **M7**：TextRecognizer + TextSelectionOverlayView + 复制全部按钮 + ⌘C —— FR-6
 
 ## 7. 已定决策与风险
