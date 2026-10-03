@@ -182,10 +182,11 @@ final class CanvasScrollView: NSScrollView {
         } else {
             imageFrame = docView.bounds
         }
+        // 帧与内容都必须禁用隐式动画：contents 默认带交叉淡入，若只禁帧动画，
+        // 切图瞬间图层框已变成新图比例、旧图还在淡出，会出现旧图被拉伸成新比例的残影
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         imageLayer.frame = imageFrame
-        CATransaction.commit()
         animatedImageView.frame = imageFrame
         cropOverlay.frame = imageFrame
         textOverlay.frame = imageFrame
@@ -207,6 +208,7 @@ final class CanvasScrollView: NSScrollView {
             animatedImageView.isHidden = true
             imageLayer.contents = image
         }
+        CATransaction.commit()
 
         if let cropSession {
             cropOverlay.isHidden = false
