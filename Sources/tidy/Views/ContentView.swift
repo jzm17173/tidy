@@ -76,7 +76,7 @@ struct ContentView: View {
                         Image(systemName: "crop")
                     }
                     .help("裁剪（C）")
-                    .disabled(viewModel.currentItemIsAnimated || viewModel.currentItem == nil)
+                    .disabled(!viewModel.canStartCropping)
 
                 case .cropping:
                     Button { viewModel.confirmCrop() } label: {

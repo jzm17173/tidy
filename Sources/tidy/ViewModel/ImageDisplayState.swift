@@ -34,7 +34,9 @@ final class ImageDisplayState: ObservableObject {
                 image = full
             } catch {
                 guard gen == generation else { return }
-                // 解码失败（损坏）→ 错误占位页，可继续切换（详设 §2.2）
+                // 解码失败（损坏）→ 错误占位页，可继续切换（详设 §2.2）；
+                // 缩略图一并丢弃：保证 image 非空 ⇔ 当前项可显示（裁剪入口据此放行）
+                image = nil
                 self.error = error
             }
         }

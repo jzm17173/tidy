@@ -57,8 +57,8 @@ Hardened Runtime（公证必需；不开 App Sandbox——非 App Store 分发�
 enum Mode { case viewing, cropping(CropSession) }
 
 @MainActor final class GalleryViewModel: ObservableObject {
-    @Published private(set) var items: [GalleryItem]   // 图集
-    @Published private(set) var index: Int
+    @Published var items: [GalleryItem]                // 图集（测试直接构造图集，不设 private(set)）
+    @Published var index: Int
     @Published var mode: Mode = .viewing
     @Published var toast: Toast?
     let displayState: ImageDisplayState                // 缩略图→高清 两级
@@ -88,8 +88,9 @@ enum Mode { case viewing, cropping(CropSession) }
 
 struct GalleryItem: Identifiable {
     let url: URL
-    var isValid: Bool                  // 懒校验失败（文件消失）→ 从 items 移除，
-                                       // isValid 仅在移除前的同帧内短暂为 false
+    var isSupported: Bool = true       // 白名单外格式（RAW/SVG 等）：仍留在图集，
+                                       // 该项显示错误占位页，←/→ 可离开
+    var id: URL { url }
 }
 ```
 
@@ -100,7 +101,7 @@ struct GalleryItem: Identifiable {
 
 **切换流程**（`next()` 为例）：
 
-1. 从 `index+1` 起逐项 `checkResourceIsReachable` 懒校验；失效项**立即从 `items` 移除**，继续找下一个有效项（移除后索引同步前移）。
+1. 从 `index+1`（`previous()` 为 `index-1`）起逐项 `checkResourceIsReachable` 懒校验：失效项**立即从 `items` 移除**并继续沿同方向找下一个有效项（首尾回绕；探测预算 = 进入时的图集大小，最多探一轮），未探测到的失效项留到下次校验。**被移除项在当前张之前时，当前张下标同步前移一位**——否则下标会指向被删项，下一轮又按原位前进而跳过紧邻的有效图。
 2. 更新 `index` → 触发 `displayState.load(item)`。
 3. `ImageLoader.preload(items: at: ±1)`。
 4. 若 `items` 被清空 → 切空态页。
@@ -196,7 +197,7 @@ enum Handle { case topLeft, top, topRight, left, move, right, bottomLeft, bottom
 
 **选区随缩放/窗口自适应**：裁剪 overlay 是图片文档视图的子视图，选区使用**图片文档坐标**（随滚动/缩放移动）；缩放或窗口尺寸变化时由 `GalleryViewModel` 用 `CropSession.remapped` 按新旧文档尺寸等比重映射（缩放换算见 2.6 缩放策略），选区相对图片不漂移，滚动条存在时也可正常拖拽与保存。
 
-**动图守卫**：`GalleryViewModel.startCropping()` 前检查当前项 UTI 是否 `public.gif` 或动图 WebP（frame count > 1）；是则 toast「动图暂不支持裁剪」并直接返回，裁剪按钮置灰（`disabled`）。
+**裁剪入口守卫**：`GalleryViewModel.startCropping()` 依次检查——当前项存在且在支持格式白名单内、非动图（UTI `public.gif` 或动图 WebP：frame count > 1）、无解码错误（当前显示为错误占位页）、图像与原始尺寸均已就绪（`displayState.image != nil && originalImageSize != nil`）。任一不满足即不进入裁剪：**动图单独给反馈**（toast「动图暂不支持裁剪」），其余静默返回（画面已是错误占位页或尚未加载完，与 `W` 键在不支持格式上的静默守卫同一策略）。标题栏裁剪按钮的置灰与入口守卫**共用同一判据**（`canStartCropping`）——加载中 / 解码错误 / 不支持格式 / 动图一律置灰，不出现「按钮亮着但按下去没反应」。
 
 #### 保存导出：CropExporter（Service）
 
@@ -287,9 +288,9 @@ Finder 右键→打开方式→tidy
       白名单过滤 → 全部不支持? → 错误占位页「不支持的图片格式」，结束
       枚举目录图片 → items 建好, index 定位
         ├ TCC 拒绝 → NSOpenPanel 引导 → 选中: 重建图集 / 取消: 图集仅含被打开文件 + toast
-      ImageLoader.thumbnail() → 先渲染缩略图
-        ├ 解码失败(损坏) → 错误占位页，可继续切换
+      ImageLoader.thumbnail() → 先渲染缩略图（失败则画布留空）
       ImageLoader.fullImage() (async) → 缓存后替换
+        ├ 全图失败(损坏) → 丢弃缩略图 + 错误占位页，可继续切换（裁剪入口随之关闭）
   → 标题更新 "目录名 — photo_001.jpg (3/24)"
 ```
 
@@ -331,7 +332,8 @@ Sources/tidy/
 ├── Services/       ImageLoader, FileTrasher, CropExporter, DirectoryScanner
 └── Support/        Extensions, Constants, OrientationNormalizer, ZoomPolicy, ImageMetadata
 Tests/tidyTests/    DirectoryScannerTests, CropSessionTests, CropExporterTests,
-                    FileTrasherTests, ImageLoaderTests, ZoomPolicyTests
+                    FileTrasherTests, GalleryViewModelTests, ImageLoaderTests,
+                    ZoomPolicyTests
 Resources/          Info.plist（CFBundleDocumentTypes / NSServices 声明）、AppIcon.icns（应用图标）
 scripts/            bundle.sh（swift build -c release → 组装 tidy.app）、
                     dmg.sh（bundle → 读写 dmg 内用 AppleScript 摆安装窗口：双分辨率
@@ -351,6 +353,7 @@ scripts/            bundle.sh（swift build -c release → 组装 tidy.app）、
 | ZoomPolicy | fit 模式：大图 = fit、小图 = 100% 不放大；fillWidth 模式：宽度铺满（可超 100%）、极窄图封顶 maxScale；默认模式：巨高图（高/宽 ≥ 阈值）= fillWidth、普通/竖构图/巨宽图 = fit；非法尺寸不崩溃 |
 | CropExporter | suggestURL 命名：原名 → ` (2)` → ` (3)`、跳过已存在文件；动图拒绝裁剪；EXIF 方向正确；macOS 13 WebP 降级 PNG |
 | FileTrasher | 正常删除、文件已不存在（移除并跳下一张）、占用/权限失败（留在当前张）、空态 |
+| GalleryViewModel | 切换：首尾循环、跳过失效项（回绕、连续失效过半仍命中有效项）、全部失效进空态、裁剪态不切图；裁剪入口：不支持格式 / 动图 / 解码错误态 / 图像未就绪均置灰且 `C` 无效，就绪且非动图可进入 |
 | ImageLoader | HEIC/GIF/WebP 解码、损坏文件 failed 分支、缓存命中、>50MP 降采样、**竖拍 EXIF 方向显示转正** |
 | 手动验收 | PRD 中各 FR 的验收标准逐条过 |
 

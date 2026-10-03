@@ -138,27 +138,26 @@ final class GalleryViewModel: ObservableObject {
 
     private func move(by delta: Int) {
         guard mode == .viewing, !items.isEmpty, delta != 0 else { return }
-        var steps = 0
-        while steps < items.count, !items.isEmpty {
+        // 探测预算取初始图集大小（不随图集收缩而缩小）：每轮要么命中返回、要么移除一项，最多探测一轮
+        var probesLeft = items.count
+        while probesLeft > 0, !items.isEmpty {
             let candidate = items.count > 1 ? (index + delta + items.count) % items.count : index
             if isReachable(items[candidate].url) {
                 index = candidate
                 afterIndexChanged()
                 return
             }
-            // 文件已被外部删除：从图集移除并继续找下一张（PRD FR-2）
+            // 文件已被外部删除：从图集移除并继续找下一张有效项（PRD FR-2）
             items.remove(at: candidate)
             if items.isEmpty { break }
-            if candidate < index || index >= items.count {
-                index = max(0, min(candidate, items.count - 1))
-            }
-            steps += 1
+            // 被移除项在当前张之前 → 当前张下标同步前移一位；之后则不动（详设 §2.2 切换流程）
+            if candidate < index { index -= 1 }
+            probesLeft -= 1
         }
         // 全部失效 → 空态页
         if items.isEmpty {
             index = 0
-            displayState.clear()
-            originalImageSize = nil
+            clearCurrentImage()
         }
     }
 
@@ -166,12 +165,17 @@ final class GalleryViewModel: ObservableObject {
         (try? url.checkResourceIsReachable()) == true
     }
 
+    /// 清空当前图显示（空态页 / 不支持格式 / 全部失效）：显示状态、原始尺寸、缩放与视图模式一并复位
+    private func clearCurrentImage() {
+        displayState.clear()
+        originalImageSize = nil
+        scale = 1
+        viewMode = .fit
+    }
+
     private func afterIndexChanged() {
         guard let item = currentItem, item.isSupported else {
-            displayState.clear()
-            originalImageSize = nil
-            scale = 1
-            viewMode = .fit
+            clearCurrentImage()
             return
         }
         originalImageSize = ImageMetadata.pointSize(of: item.url)
@@ -214,21 +218,47 @@ final class GalleryViewModel: ObservableObject {
             afterIndexChanged()
         } else {
             index = 0
-            displayState.clear()
-            originalImageSize = nil
+            clearCurrentImage()
         }
     }
 
     // MARK: - 裁剪（详设 §2.5 / 时序 3.3）
 
+    /// 裁剪入口不可进入的原因（nil = 可进入）：按钮置灰与 C 键入口共用同一来源，避免两处判据漂移
+    private enum CropEntryBlocker: Equatable {
+        case notViewing      // 不在查看模式（裁剪态另有键位路由）
+        case noItem          // 无当前项
+        case unsupported     // 白名单外格式（画面为错误占位页）
+        case animated        // GIF / 动图 WebP
+        case notReady        // 图像未就绪或有解码错误（错误占位页）
+    }
+
+    /// 裁剪入口守卫（详设 §2.5）：查看模式 + 当前项受支持 + 非动图 + 无解码错误 + 图像与原始尺寸就绪
+    private var cropEntryBlocker: CropEntryBlocker? {
+        guard mode == .viewing else { return .notViewing }
+        guard let item = currentItem else { return .noItem }
+        guard item.isSupported else { return .unsupported }
+        if currentItemIsAnimated { return .animated }
+        guard imageReadyForCropping else { return .notReady }
+        return nil
+    }
+
+    /// 标题栏裁剪按钮的置灰判据（ContentView 的 `.disabled`）
+    var canStartCropping: Bool { cropEntryBlocker == nil }
+
+    /// 图像侧就绪条件：解码错误态（错误占位页）或两级加载未就绪（image 为空）都不得进入裁剪
+    private var imageReadyForCropping: Bool {
+        displayState.error == nil && displayState.image != nil && originalImageSize != nil
+    }
+
     func startCropping() {
-        guard mode == .viewing, let item = currentItem, item.isSupported else { return }
-        // 动图守卫：GIF / 动图 WebP 拒绝裁剪
-        if CropExporter.isAnimatedImage(item.url) {
+        let blocker = cropEntryBlocker
+        // 动图是唯一给反馈的不可裁剪原因（详设 §2.5 动图守卫）；其余静默返回，按钮已置灰
+        if blocker == .animated {
             showToast("动图暂不支持裁剪")
             return
         }
-        guard displayState.image != nil, originalImageSize != nil else { return }
+        guard blocker == nil else { return }
         mode = .cropping(CropSession(imageRectInView: imageDocRect))
     }
 
