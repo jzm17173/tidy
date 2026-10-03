@@ -19,8 +19,9 @@ actor ImageLoader {
 
     /// 快速缩略图。maxPixel 是长边像素（视图长边 × backingScale）。
     /// kCGImageSourceCreateThumbnailWithTransform 会应用 EXIF 方向。
-    /// 若全图已缓存则直接命中缓存。
+    /// 若全图已缓存则直接命中缓存。已取消的任务直接放弃（actor 串行队列不堆积陈旧解码）
     func thumbnail(for url: URL, maxPixel: CGFloat) async -> CGImage? {
+        guard !Task.isCancelled else { return nil }
         if let cached = cache.object(forKey: url as NSURL) {
             cacheHits += 1
             return cached
@@ -35,8 +36,9 @@ actor ImageLoader {
     }
 
     /// 全图：超过 50MP 用缩略图 API 降采样（参数是长边像素，按宽高比换算）；
-    /// 否则全量解码并按 EXIF 方向转正。
+    /// 否则全量解码并按 EXIF 方向转正。已取消的任务直接放弃（调用方按代次守卫忽略该错误）
     func fullImage(for url: URL) async throws -> CGImage {
+        guard !Task.isCancelled else { throw LoadError.cannotDecode }
         if let cached = cache.object(forKey: url as NSURL) {
             cacheHits += 1
             return cached

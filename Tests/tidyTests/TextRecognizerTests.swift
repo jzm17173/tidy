@@ -133,6 +133,29 @@ final class TextRecognizerTests: XCTestCase {
         }
     }
 
+    /// 防抖 + 取消：快速连续切图时只有最终停下的图产生识别结果（频繁切换 CPU 堆积的回归测试）
+    func testRapidSwitchRecognizesOnlySettledImage() throws {
+        let urlA = tempDir.appendingPathComponent("aaa.jpg")
+        let urlB = tempDir.appendingPathComponent("bbb.jpg")
+        try TestImageFactory.write(makeTextImage("HELLO"), to: urlA, type: .jpeg)
+        try TestImageFactory.write(makeTextImage("WORLD"), to: urlB, type: .jpeg)
+        let box = TestBox<GalleryViewModel>()
+        runAsync {
+            await MainActor.run {
+                let vm = GalleryViewModel()
+                vm.open([urlA])
+                vm.open([urlB]) // 立刻切走：A 的识别任务应被取消
+                box.value = vm
+            }
+            await waitUntil(timeout: 15) {
+                await MainActor.run { !(box.value?.textLines.isEmpty ?? true) }
+            }
+            let texts = await MainActor.run { box.value?.textLines.map { $0.text } ?? [] }
+            XCTAssertTrue(texts.contains { $0.contains("WORLD") }, "应识别最终停下的 B：\(texts)")
+            XCTAssertFalse(texts.contains { $0.contains("HELLO") }, "A 的识别应已被取消：\(texts)")
+        }
+    }
+
     /// 动图（GIF）：不启动识别，textLines 恒为空（详设 §2.7 范围）
     func testAnimatedImageSkipsTextRecognition() throws {
         let gif = tempDir.appendingPathComponent("anim.gif")

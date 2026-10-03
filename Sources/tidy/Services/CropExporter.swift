@@ -55,13 +55,23 @@ enum CropExporter {
     }
 
     /// 动图守卫：GIF / 动图 WebP（frame count > 1）不支持裁剪（详设 §2.5）
+    /// 动图判定进程内缓存：同一文件的 UTI/帧数解析（CGImageSource）只做一次——
+    /// 裁剪按钮置灰（canStartCropping）每次视图刷新都会调用，无缓存时每次都在主线程
+    /// 重复解析 ImageIO，频繁切图时 CPU 打满（cpu_resource.diag 实证）
+    private static let animatedCache = NSCache<NSURL, NSNumber>()
+
     static func isAnimatedImage(_ url: URL) -> Bool {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let type = CGImageSourceGetType(source) as String?,
-              type == UTType.gif.identifier || type == UTType.webP.identifier else {
-            return false
+        if let cached = animatedCache.object(forKey: url as NSURL) { return cached.boolValue }
+        let result: Bool
+        if let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+           let type = CGImageSourceGetType(source) as String?,
+           type == UTType.gif.identifier || type == UTType.webP.identifier {
+            result = CGImageSourceGetCount(source) > 1
+        } else {
+            result = false
         }
-        return CGImageSourceGetCount(source) > 1
+        animatedCache.setObject(NSNumber(value: result), forKey: url as NSURL)
+        return result
     }
 
     /// 写盘质量策略（详设 §2.5）：PNG/TIFF/BMP 无损编码；JPEG 质量 1.0 重编码；HEIC 最高质量

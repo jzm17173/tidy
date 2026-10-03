@@ -40,32 +40,34 @@ struct TextSelection: Equatable {
 
 /// 图片文本识别（详设 §2.7）：Vision OCR，识别是增强能力——失败/无文本一律返回空，不阻塞浏览。
 enum TextRecognizer {
-    /// 识别静态图中的文本行（含逐字符框），按阅读顺序（自上而下、同行自左而右）排列
+    /// 识别静态图中的文本行（含逐字符框），按阅读顺序（自上而下、同行自左而右）排列。
+    /// 非隔离异步：跑在全局并发池（不占主线程）且**响应取消**——
+    /// 不用 Task.detached（detached 不继承取消，频繁切图时旧请求会跑到底堆积 CPU）
     static func recognize(image: CGImage) async -> [RecognizedTextLine] {
-        await Task.detached(priority: .userInitiated) {
-            let request = VNRecognizeTextRequest()
-            request.recognitionLevel = .accurate
-            request.recognitionLanguages = ["zh-Hans", "en-US"]
-            request.usesLanguageCorrection = true
-            let handler = VNImageRequestHandler(cgImage: image)
-            guard (try? handler.perform([request])) != nil,
-                  let results = request.results else { return [] }
-            return results.compactMap { observation in
-                guard let candidate = observation.topCandidates(1).first else { return nil }
-                return RecognizedTextLine(
-                    text: candidate.string,
-                    boundingBox: observation.boundingBox,
-                    charBoxes: charBoxes(of: candidate)
-                )
+        guard !Task.isCancelled else { return [] }
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.recognitionLanguages = ["zh-Hans", "en-US"]
+        request.usesLanguageCorrection = true
+        let handler = VNImageRequestHandler(cgImage: image)
+        guard (try? handler.perform([request])) != nil,
+              let results = request.results,
+              !Task.isCancelled else { return [] } // perform 可能耗时数秒，返回后再查一次
+        return results.compactMap { observation in
+            guard let candidate = observation.topCandidates(1).first else { return nil }
+            return RecognizedTextLine(
+                text: candidate.string,
+                boundingBox: observation.boundingBox,
+                charBoxes: charBoxes(of: candidate)
+            )
+        }
+        .sorted { lhs, rhs in
+            // Vision 左下原点：maxY 大 = 更靠上；同带（行高一半内）按 minX 排
+            if abs(lhs.boundingBox.maxY - rhs.boundingBox.maxY) > min(lhs.boundingBox.height, rhs.boundingBox.height) / 2 {
+                return lhs.boundingBox.maxY > rhs.boundingBox.maxY
             }
-            .sorted { lhs, rhs in
-                // Vision 左下原点：maxY 大 = 更靠上；同带（行高一半内）按 minX 排
-                if abs(lhs.boundingBox.maxY - rhs.boundingBox.maxY) > min(lhs.boundingBox.height, rhs.boundingBox.height) / 2 {
-                    return lhs.boundingBox.maxY > rhs.boundingBox.maxY
-                }
-                return lhs.boundingBox.minX < rhs.boundingBox.minX
-            }
-        }.value
+            return lhs.boundingBox.minX < rhs.boundingBox.minX
+        }
     }
 
     /// 逐字符框（`VNRecognizedText.boundingBox(for:)`，与预览.app 同一数据源）；

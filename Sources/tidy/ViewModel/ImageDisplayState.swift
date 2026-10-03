@@ -10,10 +10,14 @@ final class ImageDisplayState: ObservableObject {
     @Published private(set) var error: Error?
 
     private var generation = 0
+    private var loadTask: Task<Void, Never>?
 
     func load(_ url: URL, loader: ImageLoader, thumbnailMaxPixel: CGFloat) {
         generation += 1
         let gen = generation
+        // 取消上一张的未竟加载：频繁切换时旧解码任务不堆积（ImageIO 解码不可中途取消，
+        // 但排队未开始的直接放弃；已开始的由取消/代次守卫阻止回写）
+        loadTask?.cancel()
         image = nil
         animatedURL = nil
         error = nil
@@ -23,14 +27,14 @@ final class ImageDisplayState: ObservableObject {
             return
         }
 
-        Task {
+        loadTask = Task {
             if let thumb = await loader.thumbnail(for: url, maxPixel: thumbnailMaxPixel) {
-                guard gen == generation else { return }
+                guard !Task.isCancelled, gen == generation else { return }
                 image = thumb
             }
             do {
                 let full = try await loader.fullImage(for: url)
-                guard gen == generation else { return }
+                guard !Task.isCancelled, gen == generation else { return }
                 image = full
             } catch {
                 guard gen == generation else { return }
@@ -44,6 +48,7 @@ final class ImageDisplayState: ObservableObject {
 
     func clear() {
         generation += 1
+        loadTask?.cancel()
         image = nil
         animatedURL = nil
         error = nil

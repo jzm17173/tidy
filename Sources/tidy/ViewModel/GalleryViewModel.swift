@@ -45,6 +45,8 @@ final class GalleryViewModel: ObservableObject {
 
     private var toastGeneration = 0
     private var recognitionGeneration = 0
+    private var recognitionTask: Task<Void, Never>?
+    private var preloadTask: Task<Void, Never>?
 
     init(loader: ImageLoader = ImageLoader()) {
         self.loader = loader
@@ -177,6 +179,10 @@ final class GalleryViewModel: ObservableObject {
         originalImageSize = nil
         scale = 1
         viewMode = .fit
+        recognitionTask?.cancel()
+        recognitionTask = nil
+        preloadTask?.cancel()
+        preloadTask = nil
         recognitionGeneration += 1
         textLines = []
         textSelection = nil
@@ -196,7 +202,9 @@ final class GalleryViewModel: ObservableObject {
         let neighbors = [index - 1, index + 1]
             .filter { items.indices.contains($0) }
             .map { items[$0].url }
-        Task { await loader.preload(urls: neighbors) }
+        // 上一轮的预加载一并取消（频繁切换时不在 actor 队列里堆积陈旧解码）
+        preloadTask?.cancel()
+        preloadTask = Task { await loader.preload(urls: neighbors) }
     }
 
     // MARK: - 删除（详设 §2.4 / 时序 3.2）
@@ -234,18 +242,24 @@ final class GalleryViewModel: ObservableObject {
 
     // MARK: - 文本识别（详设 §2.7：后台识别、划选复制、复制全部）
 
-    /// 切图即重置并后台重识别：动图与解码失败 → 空（识别是增强能力，不阻塞浏览）
+    /// 切图即重置并后台重识别：动图与解码失败 → 空（识别是增强能力，不阻塞浏览）。
+    /// 防抖 + 取消：300ms 内连续切图时前一个识别任务被取消，只有停下的图真正跑 OCR
+    /// （否则快速翻阅会堆积大量并发 Vision 请求，CPU 打满，cpu_resource.diag 实证）
     private func recognizeText(on item: GalleryItem) {
+        recognitionTask?.cancel()
         recognitionGeneration += 1
         textLines = []
         textSelection = nil
         guard !CropExporter.isAnimatedImage(item.url) else { return }
         let gen = recognitionGeneration
-        Task {
+        recognitionTask = Task {
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard !Task.isCancelled, gen == recognitionGeneration else { return }
             // OCR 走独立降采样副本（与显示加载并行）；Vision 返回归一化坐标，与分辨率无关
-            guard let image = await loader.thumbnail(for: item.url, maxPixel: Constants.textRecognitionMaxPixel) else { return }
+            guard let image = await loader.thumbnail(for: item.url, maxPixel: Constants.textRecognitionMaxPixel),
+                  !Task.isCancelled, gen == recognitionGeneration else { return }
             let lines = await TextRecognizer.recognize(image: image)
-            guard gen == recognitionGeneration else { return }
+            guard !Task.isCancelled, gen == recognitionGeneration else { return }
             textLines = lines
         }
     }

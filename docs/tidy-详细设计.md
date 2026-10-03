@@ -137,6 +137,8 @@ actor ImageLoader {
 
 - **EXIF 方向**：`CGImageSourceCreateThumbnailAtIndex` / `CGImageSourceCreateImageAtIndex` 默认**不应用** EXIF orientation，竖拍 JPEG/HEIC 会横躺。缩略图加载用 `kCGImageSourceCreateThumbnailWithTransform: true`；全图走 `CGImageSourceCreateImageAtIndex` 后，从 image source 属性字典读 `kCGImagePropertyOrientation`，对 CGImage 做对应的仿射变换转正，保证**显示与导出使用同一套转正逻辑**——否则"显示未转正、导出已转正"会导致裁剪选区与导出结果错位。
 
+- **取消检查**：actor 让所有解码调用天然串行——频繁切图时陈旧任务会在队列里堆积。`thumbnail`/`fullImage` 入口先查 `Task.isCancelled` 直接放弃，配合调用方（displayState / 预加载 / OCR）切图即取消，队列快速泄洪（见 §7 频繁切换）。
+
 ### 2.4 删除：FileTrasher（Service）
 
 ```swift
@@ -287,7 +289,7 @@ ContentView (SwiftUI)
 
 **识别管道**（`Services/TextRecognizer.swift`）：Vision `VNRecognizeTextRequest`（`.accurate`、`zh-Hans/en-US`、`usesLanguageCorrection`），`Task.detached` 后台执行。识别是**增强能力**：失败/无文本一律返回空数组，不抛错、不阻塞浏览。结果按阅读顺序排序（Vision 左下原点：`maxY` 大者在前，同带按 `minX`）。除行框外同步取**逐字符框**（`VNRecognizedText.boundingBox(for:)`，与预览.app 同一数据源）——字符级划选的命中基准；某行字符框取不全（旋转文本等）则该行退化为整行选择。
 
-**触发与生命周期**：`GalleryViewModel.recognizeText(on:)` 在切图（`afterIndexChanged`）时启动——OCR 走**独立降采样副本**（`loader.thumbnail(maxPixel: 2560)`，与显示加载并行；Vision 返回归一化坐标，与分辨率无关）。动图（GIF/动图 WebP）直接跳过；不支持格式 / 空态 / 解码失败由 `clearCurrentImage` 复位（代次号防串台，同 displayState）。`textLines` 随切图即清空，识别完成再回填。
+**触发与生命周期**：`GalleryViewModel.recognizeText(on:)` 在切图（`afterIndexChanged`）时启动——OCR 走**独立降采样副本**（`loader.thumbnail(maxPixel: 2560)`，与显示加载并行；Vision 返回归一化坐标，与分辨率无关）。动图（GIF/动图 WebP）直接跳过；不支持格式 / 空态 / 解码失败由 `clearCurrentImage` 复位（代次号防串台，同 displayState）。`textLines` 随切图即清空，识别完成再回填。**防抖 + 取消**：识别任务先 sleep 300ms，期间被新切图取消则完全不产生 OCR 开销；`recognize` 不用 `Task.detached`（detached 不继承取消），每个 await 后查 `Task.isCancelled`——频繁切换时只识别最终停下的图（曾实证：快速翻阅堆积并发 Vision 请求，55% CPU 超系统限额，见 §7 频繁切换）。
 
 **划选交互**（`Views/TextSelectionOverlayView.swift`，NSView）：图片文档视图的子视图（与 cropOverlay 同层模式，frame = 图片显示区），坐标为图片文档坐标——随滚动/缩放/视图模式自动跟随图片，无需重映射。
 
@@ -377,7 +379,7 @@ scripts/            bundle.sh（swift build -c release → 组装 tidy.app）、
 | CropExporter | suggestURL 命名：原名 → ` (2)` → ` (3)`、跳过已存在文件；动图拒绝裁剪；EXIF 方向正确；macOS 13 WebP 降级 PNG |
 | FileTrasher | 正常删除、文件已不存在（移除并跳下一张）、占用/权限失败（留在当前张）、空态 |
 | GalleryViewModel | 切换：首尾循环、跳过失效项（回绕、连续失效过半仍命中有效项）、全部失效进空态、裁剪态不切图；裁剪入口：不支持格式 / 动图 / 解码错误态 / 图像未就绪均置灰且 `C` 无效，就绪且非动图可进入 |
-| TextRecognizer | 渲染文本图 OCR 命中、无文本图返回空、逐字符框与文本一一对应、归一化→文档坐标换算（y 翻转）、fullText 行序拼接、selectedText 字符级截取（首尾行部分、跨行、反向拖选、空选择）；ViewModel 集成：静态图切图后 textLines 回填、动图不识别、复制全部 / 复制划选写剪贴板、无文本静默不动作 |
+| TextRecognizer | 渲染文本图 OCR 命中、无文本图返回空、逐字符框与文本一一对应、归一化→文档坐标换算（y 翻转）、fullText 行序拼接、selectedText 字符级截取（首尾行部分、跨行、反向拖选、空选择）；ViewModel 集成：静态图切图后 textLines 回填、**快速切图只识别最终停下的图（防抖 + 取消）**、动图不识别、复制全部 / 复制划选写剪贴板、无文本静默不动作 |
 | ImageLoader | HEIC/GIF/WebP 解码、损坏文件 failed 分支、缓存命中、>50MP 降采样、**竖拍 EXIF 方向显示转正** |
 | 手动验收 | PRD 中各 FR 的验收标准逐条过 |
 
@@ -405,3 +407,4 @@ scripts/            bundle.sh（swift build -c release → 组装 tidy.app）、
 | 超大图 | 渲染走 50MP 降采样；裁剪导出绕过上限重新读原文件（见内存策略）。 |
 | 窗口尺寸 | 固定 1:1 正方形、比例锁定、最小 480×480、初始近满高居中（见 2.6）；打开/切换均不改变窗口，不记忆用户调整。无 Space 切换（长键程费力）。 |
 | 视图模式 | 只有完整预览 / 占满宽度两种，不做无级缩放（`+`/`-`/`0`/`F` 已移除）；巨高图（高/宽 ≥ 3）默认占满宽度，巨宽图不做特殊优化；窗口 1:1 锁定后视图切换只改变图片文档尺寸，超出部分由竖向滚动条承载；切图重置视图并滚回文档起点；裁剪选区用图片文档坐标，视图切换/滚动不影响导出（见 2.6 视图模式）。 |
+| 频繁切换 | 实证坑（`cpu_resource.diag`：55% CPU 超系统 50%/180s 限额）：快速翻阅时三类开销堆积——① `canStartCropping` 每次视图刷新都调 `isAnimatedImage`，无缓存时主线程重复 ImageIO 解析；② OCR 任务用 `Task.detached` 不继承取消，旧请求跑到底；③ displayState 加载 / 预加载任务不取消，在 ImageLoader actor 串行队列里堆积陈旧解码。对策：`isAnimatedImage` 进程内 NSCache；OCR 300ms 防抖 + 取消链（recognizeText / displayState.load / preload 切图即取消）；ImageLoader 入口查 `Task.isCancelled` 泄洪。 |
