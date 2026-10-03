@@ -212,7 +212,12 @@ final class CanvasScrollView: NSScrollView {
 
         if let cropSession {
             cropOverlay.isHidden = false
-            cropOverlay.session = cropSession
+            // 拖拽进行中（本地 anchor 非空）不用 viewModel 的滞后副本覆盖：
+            // 锚点只存在于 overlay 本地，覆盖会把刚按下的 anchor 抹掉导致拖不动
+            // （按下与拖动之间任何一次刷新都会走到这里：OCR 完成、Toast 消失等）
+            if cropOverlay.session.anchor == nil {
+                cropOverlay.session = cropSession
+            }
             // 选区边界 = 图片文档区（overlay 本地坐标，origin 恒为 0）
             cropOverlay.imageRect = CGRect(origin: .zero, size: docSize)
             cropOverlay.imageSize = originalSize
@@ -224,6 +229,9 @@ final class CanvasScrollView: NSScrollView {
             cropOverlay.needsDisplay = true
         } else {
             cropOverlay.isHidden = true
+            // 退出裁剪可能发生在拖拽中断时（Esc/保存后 mouseUp 不再回来），
+            // 复位锚点避免残留 anchor 挡住下一次进入裁剪的 session 赋值
+            cropOverlay.session.anchor = nil
         }
 
         if isNewImage || modeChanged {
