@@ -16,6 +16,7 @@
 - `→` 下一张，`←` 上一张；`⌫` 直接移到废纸篓（无确认）
 - `W` 切换视图：完整预览 / 占满宽度（长截图默认占满宽度，竖向滚动阅读）
 - `C` 进入裁剪（默认 100% 全选，拖拽线框调整），`Enter` 直接保存 `原名 (2).jpg` 到同目录，`Esc` 取消
+- 图片文字自动识别：鼠标在文字上划选（字符级，同 Mac 预览），`⌘C` 复制所选；标题栏按钮一键复制全部文本
 
 ## 构建与开发
 
@@ -23,7 +24,7 @@ SwiftPM 工程（Swift 5.8+ / macOS 13+），零第三方依赖：
 
 ```sh
 swift build          # 编译
-swift test           # 单元测试（DirectoryScanner / CropSession / CropExporter / FileTrasher / ImageLoader / ZoomPolicy）
+swift test           # 单元测试（DirectoryScanner / CropSession / CropExporter / FileTrasher / GalleryViewModel / ImageLoader / TextRecognizer / ZoomPolicy）
 scripts/bundle.sh    # release 构建并组装 tidy.app（含 Info.plist 声明）
 scripts/dmg.sh       # 产出 tidy.dmg（未签名/未公证，他人机器首次打开需右键 → 打开）
 ```

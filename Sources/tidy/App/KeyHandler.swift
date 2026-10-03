@@ -26,6 +26,12 @@ final class KeyHandler {
         // 带 Cmd/Ctrl/Option 的组合键放行给系统菜单（Shift 除外，裁剪微调用）；
         // 注意只交集这四个：方向键天然带 .function/.numericPad，交集 deviceIndependentFlagsMask 会误判
         let modifiers = event.modifierFlags.intersection([.shift, .control, .option, .command])
+        // ⌘C：有文本划选时复制所选（详设 §2.7）；无划选放行给系统
+        if modifiers == [.command], event.keyCode == 8, event.charactersIgnoringModifiers == "c",
+           case .viewing = viewModel.mode, viewModel.textSelection != nil {
+            viewModel.copySelectedText()
+            return nil
+        }
         guard modifiers.isSubset(of: [.shift]) else { return event }
 
         switch viewModel.mode {
@@ -39,6 +45,9 @@ final class KeyHandler {
                 return nil
             case 51: // ⌫
                 viewModel.trashCurrent()
+                return nil
+            case 53 where viewModel.textSelection != nil: // Esc：清除文本划选
+                viewModel.updateTextSelection(nil)
                 return nil
             case 8 where event.charactersIgnoringModifiers == "c": // C
                 viewModel.startCropping()

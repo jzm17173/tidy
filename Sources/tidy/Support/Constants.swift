@@ -10,4 +10,6 @@ enum Constants {
     static let minCropSize: CGFloat = 10
     /// 手柄命中热区
     static let handleHotZone: CGFloat = 12
+    /// 文本识别用的降采样长边（OCR 精度与耗时的平衡；归一化坐标与分辨率无关）
+    static let textRecognitionMaxPixel: CGFloat = 2560
 }

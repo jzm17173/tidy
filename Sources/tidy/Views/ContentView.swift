@@ -38,7 +38,10 @@ struct ContentView: View {
                         originalSize: viewModel.originalImageSize ?? .zero,
                         scale: viewModel.scale,
                         onSizeChange: { viewModel.updateCanvasSize($0) },
-                        onCropChange: { viewModel.updateCropSession($0) }
+                        onCropChange: { viewModel.updateCropSession($0) },
+                        textLines: viewModel.textLines,
+                        textSelection: viewModel.textSelection,
+                        onTextSelectionChange: { viewModel.updateTextSelection($0) }
                     )
                 }
             }
@@ -59,6 +62,12 @@ struct ContentView: View {
             ToolbarItemGroup(placement: .primaryAction) {
                 switch viewModel.mode {
                 case .viewing:
+                    Button { viewModel.copyAllText() } label: {
+                        Image(systemName: "doc.on.doc")
+                    }
+                    .help("复制全部文本")
+                    .disabled(viewModel.textLines.isEmpty)
+
                     Button { viewModel.toggleViewMode() } label: {
                         Image(systemName: viewModel.viewMode == .fit
                               ? "rectangle.expand.vertical" : "rectangle.compress.vertical")

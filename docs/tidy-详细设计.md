@@ -78,6 +78,12 @@ enum Mode { case viewing, cropping(CropSession) }
     func trashCurrent()                // FR-3
     func startCropping() / confirmCrop() / cancelCrop()
 
+    @Published var textLines: [RecognizedTextLine]     // 识别文本行（测试直接构造，不设 private(set)）
+    @Published var textSelection: ClosedRange<Int>?    // 划选行下标
+    func copyAllText() / copySelectedText()            // FR-6：复制全部 / 复制划选（写剪贴板 + toast）
+    func updateTextSelection(_:)
+    // 切图即重置并后台重识别（recognizeText）：动图/解码失败 → 空，见 2.7
+
     func updateCanvasSize(_:)
     // 画布可视区尺寸回写：两种视图模式都跟随窗口，按当前模式重算缩放（ZoomPolicy）；
     // 裁剪中的选区按新旧文档尺寸 remap（CropSession.remapped），
@@ -102,7 +108,7 @@ struct GalleryItem: Identifiable {
 **切换流程**（`next()` 为例）：
 
 1. 从 `index+1`（`previous()` 为 `index-1`）起逐项 `checkResourceIsReachable` 懒校验：失效项**立即从 `items` 移除**并继续沿同方向找下一个有效项（首尾回绕；探测预算 = 进入时的图集大小，最多探一轮），未探测到的失效项留到下次校验。**被移除项在当前张之前时，当前张下标同步前移一位**——否则下标会指向被删项，下一轮又按原位前进而跳过紧邻的有效图。
-2. 更新 `index` → 触发 `displayState.load(item)`。
+2. 更新 `index` → 触发 `displayState.load(item)` 与文本重识别（`recognizeText`，见 2.7）。
 3. `ImageLoader.preload(items: at: ±1)`。
 4. 若 `items` 被清空 → 切空态页。
 
@@ -248,13 +254,13 @@ ContentView (SwiftUI)
 │     CropOverlayView 是文档视图的子视图，mode == .cropping 时显示
 │     （选区 = 图片文档坐标，随滚动/缩放移动，见 2.5）
 ├── .toolbar（标题栏右侧，与全屏按钮同一区域，参考 Mac 预览）
-│     viewing：⛶ 视图切换、🗑 删除、✂ 裁剪 ｜ cropping：💾 保存、✕ 退出
+│     viewing：📋 复制全部文本、⛶ 视图切换、🗑 删除、✂ 裁剪 ｜ cropping：💾 保存、✕ 退出
 │     不单设工具栏区域；无 ←/→ 按钮，切换仅键盘快捷键
 ├── ToastView              底部浮层
 └── EmptyStateView / ErrorStateView
 ```
 
-**键盘处理**：`NSEvent.addLocalMonitorForEvents(matching: .keyDown)` 统一分发，按 `mode` 决定路由（viewing：`→` 下一张、`←` 上一张、`⌫` 删除、`C` 裁剪、`W` 切换视图；cropping：`Enter` 保存、`Esc` 退出、方向键微调选区 1pt、Shift+方向 10pt、`W` 切换视图，**其余按键一律不响应**）。**不提供 Space 切换**（长键程费力，PRD FR-2 决策）。
+**键盘处理**：`NSEvent.addLocalMonitorForEvents(matching: .keyDown)` 统一分发，按 `mode` 决定路由（viewing：`→` 下一张、`←` 上一张、`⌫` 删除、`C` 裁剪、`W` 切换视图、`⌘C` 复制划选文本、`Esc` 清除划选；cropping：`Enter` 保存、`Esc` 退出、方向键微调选区 1pt、Shift+方向 10pt、`W` 切换视图，**其余按键一律不响应**）。**不提供 Space 切换**（长键程费力，PRD FR-2 决策）。`⌘C` 在修饰键放行判断**之前**单独拦截：有文本划选才消费，无划选放行给系统（见 2.7）。
 
 > ⚠️ **修饰键过滤的坑**：方向键的 NSEvent 天然带 `.function` + `.numericPad` 标记（`modifierFlags` rawValue 含 0xA00000），若用 `deviceIndependentFlagsMask` 做"放行组合键"判断会把方向键误判为系统组合键直接放行，快捷键全部失灵。修饰键白名单只能交集 `.shift / .control / .option / .command` 四项。
 
@@ -277,6 +283,21 @@ ContentView (SwiftUI)
 - **滚动**：切图/切模式滚回文档起点（阅读顺序，两模式互不带入滚动状态）；占满宽度下窗口尺寸变化保持可视中心。
 - **原始尺寸**：`Support/ImageMetadata.pointSize`（ImageIO 属性，EXIF orientation 5–8 交换宽高）读取，与可能 >50MP 降采样的显示图解耦；裁剪换算（`pixelRect(scale:imageSize:)`）以此为基准，视图模式/降采样都不影响导出正确性。
 
+### 2.7 文本识别：TextRecognizer + TextSelectionOverlayView
+
+**识别管道**（`Services/TextRecognizer.swift`）：Vision `VNRecognizeTextRequest`（`.accurate`、`zh-Hans/en-US`、`usesLanguageCorrection`），`Task.detached` 后台执行。识别是**增强能力**：失败/无文本一律返回空数组，不抛错、不阻塞浏览。结果按阅读顺序排序（Vision 左下原点：`maxY` 大者在前，同带按 `minX`）。除行框外同步取**逐字符框**（`VNRecognizedText.boundingBox(for:)`，与预览.app 同一数据源）——字符级划选的命中基准；某行字符框取不全（旋转文本等）则该行退化为整行选择。
+
+**触发与生命周期**：`GalleryViewModel.recognizeText(on:)` 在切图（`afterIndexChanged`）时启动——OCR 走**独立降采样副本**（`loader.thumbnail(maxPixel: 2560)`，与显示加载并行；Vision 返回归一化坐标，与分辨率无关）。动图（GIF/动图 WebP）直接跳过；不支持格式 / 空态 / 解码失败由 `clearCurrentImage` 复位（代次号防串台，同 displayState）。`textLines` 随切图即清空，识别完成再回填。
+
+**划选交互**（`Views/TextSelectionOverlayView.swift`，NSView）：图片文档视图的子视图（与 cropOverlay 同层模式，frame = 图片显示区），坐标为图片文档坐标——随滚动/缩放/视图模式自动跟随图片，无需重映射。
+
+- **行框换算**：Vision 归一化（左下原点）→ 文档坐标（左上原点）：`x = minX·W`、`y = (1−maxY)·H`、宽高按比例（`TextRecognizer.docRect`）。
+- **命中策略**：`hitTest` 只在文本行内（外扩 2pt 容差）命中，**行外点击穿透**给文档视图——窗口拖拽/滚动不受影响；文档视图的 `mouseDown` 负责清除划选。
+- **字符级划选**：划选模型为两个端点 `(行, 字符插入位)`（`TextSelection`，锚点/光标规范化为 start ≤ end）。命中：先定行（外扩 2pt 容差），再按 x 与字符框中线比较定字符位；按下记锚点（单击收缩为空选区），拖动更新光标位（出界取最近行），反向拖选自动交换。高亮按行绘制：竖向取行框、横向取首末选中字符框的边缘并合并为一个矩形（28% `controlAccentColor` 填充 + 0.5pt 描边）。悬停行上光标变 I 型（tracking area + `.inVisibleRect`）。取文：首尾行按字符截取、中间行整行（`TextRecognizer.selectedText` 纯函数，可单测）。无字符框的行退化为整行选择/整行高亮。
+- **裁剪态互斥**：`mode == .cropping` 时 overlay 隐藏，裁剪手柄优先。
+
+**复制**：`⌘C` 复制划选（KeyHandler 在有划选时拦截，无划选放行系统）；标题栏「复制全部文本」按钮（`textLines` 为空时置灰）一键复制全图文本；均写 `NSPasteboard` + toast 反馈。`Esc`（浏览态，有划选时）清除划选。
+
 ## 3. 关键时序
 
 ### 3.1 打开图片
@@ -291,6 +312,8 @@ Finder 右键→打开方式→tidy
       ImageLoader.thumbnail() → 先渲染缩略图（失败则画布留空）
       ImageLoader.fullImage() (async) → 缓存后替换
         ├ 全图失败(损坏) → 丢弃缩略图 + 错误占位页，可继续切换（裁剪入口随之关闭）
+      recognizeText(item) (async) → 独立降采样副本后台 OCR（动图跳过）
+        → textLines 回填，划选/复制全部可用
   → 标题更新 "目录名 — photo_001.jpg (3/24)"
 ```
 
@@ -327,13 +350,13 @@ Package.swift
 Sources/tidy/
 ├── App/            TidyApp.swift, DocumentOpener, ServiceReceiver, KeyHandler
 ├── ViewModel/      GalleryViewModel, CropSession, ImageDisplayState
-├── Views/          ContentView, ImageCanvasView, CropOverlayView,
+├── Views/          ContentView, ImageCanvasView, CropOverlayView, TextSelectionOverlayView,
 │                   ToastView, EmptyStateView, WindowAccessor
-├── Services/       ImageLoader, FileTrasher, CropExporter, DirectoryScanner
+├── Services/       ImageLoader, FileTrasher, CropExporter, DirectoryScanner, TextRecognizer
 └── Support/        Extensions, Constants, OrientationNormalizer, ZoomPolicy, ImageMetadata
 Tests/tidyTests/    DirectoryScannerTests, CropSessionTests, CropExporterTests,
                     FileTrasherTests, GalleryViewModelTests, ImageLoaderTests,
-                    ZoomPolicyTests
+                    TextRecognizerTests, ZoomPolicyTests
 Resources/          Info.plist（CFBundleDocumentTypes / NSServices 声明）、AppIcon.icns（应用图标）
 scripts/            bundle.sh（swift build -c release → 组装 tidy.app）、
                     dmg.sh（bundle → 读写 dmg 内用 AppleScript 摆安装窗口：双分辨率
@@ -354,6 +377,7 @@ scripts/            bundle.sh（swift build -c release → 组装 tidy.app）、
 | CropExporter | suggestURL 命名：原名 → ` (2)` → ` (3)`、跳过已存在文件；动图拒绝裁剪；EXIF 方向正确；macOS 13 WebP 降级 PNG |
 | FileTrasher | 正常删除、文件已不存在（移除并跳下一张）、占用/权限失败（留在当前张）、空态 |
 | GalleryViewModel | 切换：首尾循环、跳过失效项（回绕、连续失效过半仍命中有效项）、全部失效进空态、裁剪态不切图；裁剪入口：不支持格式 / 动图 / 解码错误态 / 图像未就绪均置灰且 `C` 无效，就绪且非动图可进入 |
+| TextRecognizer | 渲染文本图 OCR 命中、无文本图返回空、逐字符框与文本一一对应、归一化→文档坐标换算（y 翻转）、fullText 行序拼接、selectedText 字符级截取（首尾行部分、跨行、反向拖选、空选择）；ViewModel 集成：静态图切图后 textLines 回填、动图不识别、复制全部 / 复制划选写剪贴板、无文本静默不动作 |
 | ImageLoader | HEIC/GIF/WebP 解码、损坏文件 failed 分支、缓存命中、>50MP 降采样、**竖拍 EXIF 方向显示转正** |
 | 手动验收 | PRD 中各 FR 的验收标准逐条过 |
 
@@ -365,6 +389,7 @@ scripts/            bundle.sh（swift build -c release → 组装 tidy.app）、
 4. **M4**：CropOverlayView + CropSession + CropExporter + SavePanel —— FR-4
 5. **M5**：Services 声明、图标、窗口尺寸策略、错误态打磨 —— FR-5
 6. **M6**：签名公证（dmg 打包已由 `scripts/dmg.sh` 完成：bundle → hdiutil，含 /Applications 拖装软链；未签名/未公证，仅供信任来源分发，他人机器首次打开需右键 → 打开）
+7. **M7**：TextRecognizer + TextSelectionOverlayView + 复制全部按钮 + ⌘C —— FR-6
 
 ## 7. 已定决策与风险
 

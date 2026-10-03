@@ -33,12 +33,18 @@ final class GalleryViewModel: ObservableObject {
     @Published private(set) var scale: CGFloat = 1
     /// 当前视图模式：完整预览 / 占满宽度（PRD FR-1），切换图片时按图重置
     @Published private(set) var viewMode: ViewMode = .fit
+    /// 当前图的识别文本行（阅读顺序）；空 = 无文本 / 识别中 / 不可识别（动图、不支持、错误态）（详设 §2.7）
+    /// 测试直接构造，不设 private(set)（同 items/index）
+    @Published var textLines: [RecognizedTextLine] = []
+    /// 划选中的文本（字符级：起止两个 (行, 字符位) 端点）；nil = 无划选
+    @Published var textSelection: TextSelection?
 
     let displayState = ImageDisplayState()
     let loader: ImageLoader
     weak var mainWindow: NSWindow?
 
     private var toastGeneration = 0
+    private var recognitionGeneration = 0
 
     init(loader: ImageLoader = ImageLoader()) {
         self.loader = loader
@@ -165,12 +171,15 @@ final class GalleryViewModel: ObservableObject {
         (try? url.checkResourceIsReachable()) == true
     }
 
-    /// 清空当前图显示（空态页 / 不支持格式 / 全部失效）：显示状态、原始尺寸、缩放与视图模式一并复位
+    /// 清空当前图显示（空态页 / 不支持格式 / 全部失效）：显示状态、原始尺寸、缩放、视图模式与识别结果一并复位
     private func clearCurrentImage() {
         displayState.clear()
         originalImageSize = nil
         scale = 1
         viewMode = .fit
+        recognitionGeneration += 1
+        textLines = []
+        textSelection = nil
     }
 
     private func afterIndexChanged() {
@@ -183,6 +192,7 @@ final class GalleryViewModel: ObservableObject {
         let backingScale = mainWindow?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
         let longEdge = max(canvasSize.width, canvasSize.height) * backingScale
         displayState.load(item.url, loader: loader, thumbnailMaxPixel: max(longEdge, 512))
+        recognizeText(on: item)
         let neighbors = [index - 1, index + 1]
             .filter { items.indices.contains($0) }
             .map { items[$0].url }
@@ -220,6 +230,50 @@ final class GalleryViewModel: ObservableObject {
             index = 0
             clearCurrentImage()
         }
+    }
+
+    // MARK: - 文本识别（详设 §2.7：后台识别、划选复制、复制全部）
+
+    /// 切图即重置并后台重识别：动图与解码失败 → 空（识别是增强能力，不阻塞浏览）
+    private func recognizeText(on item: GalleryItem) {
+        recognitionGeneration += 1
+        textLines = []
+        textSelection = nil
+        guard !CropExporter.isAnimatedImage(item.url) else { return }
+        let gen = recognitionGeneration
+        Task {
+            // OCR 走独立降采样副本（与显示加载并行）；Vision 返回归一化坐标，与分辨率无关
+            guard let image = await loader.thumbnail(for: item.url, maxPixel: Constants.textRecognitionMaxPixel) else { return }
+            let lines = await TextRecognizer.recognize(image: image)
+            guard gen == recognitionGeneration else { return }
+            textLines = lines
+        }
+    }
+
+    func updateTextSelection(_ selection: TextSelection?) {
+        textSelection = selection
+    }
+
+    /// 复制全部识别文本（工具栏按钮，PRD FR-6）；无文本静默不动作（按钮已置灰）
+    func copyAllText() {
+        let text = TextRecognizer.fullText(of: textLines)
+        guard !text.isEmpty else { return }
+        copyToPasteboard(text)
+        showToast("已复制全部文本")
+    }
+
+    /// 复制划选文本（⌘C，字符级截取）；无划选不动作
+    func copySelectedText() {
+        guard let selection = textSelection else { return }
+        let text = TextRecognizer.selectedText(from: textLines, selection: selection)
+        guard !text.isEmpty else { return }
+        copyToPasteboard(text)
+        showToast("已复制所选文本")
+    }
+
+    private func copyToPasteboard(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
     }
 
     // MARK: - 裁剪（详设 §2.5 / 时序 3.3）

@@ -22,21 +22,29 @@ struct ImageCanvasView: NSViewRepresentable {
     let scale: CGFloat
     let onSizeChange: (CGSize) -> Void
     let onCropChange: (CropSession) -> Void
+    /// 识别文本行（阅读顺序），空数组 = 无文本/不可识别
+    let textLines: [RecognizedTextLine]
+    /// 划选中的文本行下标（闭区间）；nil = 无划选
+    let textSelection: TextSelection?
+    let onTextSelectionChange: (TextSelection?) -> Void
 
     func makeNSView(context: Context) -> CanvasScrollView {
         let view = CanvasScrollView()
         view.onSizeChange = onSizeChange
         view.onCropChange = onCropChange
+        view.onTextSelectionChange = onTextSelectionChange
         return view
     }
 
     func updateNSView(_ nsView: CanvasScrollView, context: Context) {
         nsView.onSizeChange = onSizeChange
         nsView.onCropChange = onCropChange
+        nsView.onTextSelectionChange = onTextSelectionChange
         nsView.update(
             image: image, animatedURL: animatedURL, imageKey: imageKey,
             docSize: docSize, fitInside: fitInside, cropSession: cropSession,
-            originalSize: originalSize, scale: scale
+            originalSize: originalSize, scale: scale,
+            textLines: textLines, textSelection: textSelection
         )
     }
 }
@@ -58,16 +66,25 @@ final class CenteringClipView: NSClipView {
 
 private final class FlippedDocumentView: NSView {
     override var isFlipped: Bool { true }
+    /// 行外点击（穿透 textOverlay 的命中）→ 清除文本划选（详设 §2.7）
+    var onMouseDown: (() -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        onMouseDown?()
+        super.mouseDown(with: event)
+    }
 }
 
 final class CanvasScrollView: NSScrollView {
     var onSizeChange: ((CGSize) -> Void)?
     var onCropChange: ((CropSession) -> Void)?
+    var onTextSelectionChange: ((TextSelection?) -> Void)?
 
     private let docView = FlippedDocumentView()
     private let imageLayer = CALayer()
     private let animatedImageView = NSImageView()
     private let cropOverlay = CropOverlayView()
+    private let textOverlay = TextSelectionOverlayView()
     private var lastImageKey: URL?
     private var lastFitInside = true
 
@@ -91,6 +108,17 @@ final class CanvasScrollView: NSScrollView {
         cropOverlay.isHidden = true
         docView.addSubview(cropOverlay)
 
+        textOverlay.isHidden = true
+        textOverlay.onSelectionChange = { [weak self] range in
+            // 与 cropOverlay 同一模式：事件回调派发到主队列（FIFO 保序）
+            DispatchQueue.main.async { self?.onTextSelectionChange?(range) }
+        }
+        docView.addSubview(textOverlay)
+        docView.onMouseDown = { [weak self] in
+            guard self?.textOverlay.selection != nil else { return }
+            DispatchQueue.main.async { self?.onTextSelectionChange?(nil) }
+        }
+
         documentView = docView
     }
 
@@ -110,7 +138,9 @@ final class CanvasScrollView: NSScrollView {
         fitInside: Bool,
         cropSession: CropSession?,
         originalSize: CGSize,
-        scale: CGFloat
+        scale: CGFloat,
+        textLines: [RecognizedTextLine],
+        textSelection: TextSelection?
     ) {
         let isNewImage = imageKey != lastImageKey
         let modeChanged = fitInside != lastFitInside
@@ -158,6 +188,15 @@ final class CanvasScrollView: NSScrollView {
         CATransaction.commit()
         animatedImageView.frame = imageFrame
         cropOverlay.frame = imageFrame
+        textOverlay.frame = imageFrame
+
+        // 划选文本 overlay：裁剪态 / 无识别文本时隐藏（裁剪手柄优先，详设 §2.7）
+        if cropSession == nil, !textLines.isEmpty {
+            textOverlay.isHidden = false
+            textOverlay.update(lines: textLines, docSize: imageFrame.size, selection: textSelection)
+        } else {
+            textOverlay.isHidden = true
+        }
 
         if let animatedURL {
             animatedImageView.image = NSImage(contentsOf: animatedURL)
